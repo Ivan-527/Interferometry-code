@@ -1,0 +1,13 @@
+To get accurate results:
+    - The interferogram needs to be centred about the null point to give the
+      correct results, otehriwse they are all shifted off
+    - There is a maximum step distance that still gives good results
+    
+Potential Extensions:
+    - Find the final values using code instead of manually
+    - Fit the two peaks at the end
+    - Investigate the fourier shifts and why they are needed
+    - How many lines can you add?
+    - How does line thickness effect the interferogram and the final results?
+    - How smooth can you get the final peaks? How should you adjust your 
+      experiment to get the best results possible?
