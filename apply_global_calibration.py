@@ -1,5 +1,3 @@
-#!/usr/bin/python
-
 import sys
 import read_data_results3 as rd
 import numpy as np
@@ -17,7 +15,7 @@ def data(file):
     results = rd.read_data3('data/' + file + '.txt')
     
     # Describe the global calibration used (from either Task 6, or crossing_points.py)
-    metres_per_microstep = 3.7e-11 # metres
+    metres_per_microstep = 3.65e-11 # metres
     # if from Task 6, need to multiple by factor of 2 to account for the mirror movement to path difference conversion
     #metres_per_microstep = 2.0*metres_per_microstep
     
@@ -34,19 +32,22 @@ def data(file):
     y1 = y1 - y1.mean()
     
     # Butterworth filter to correct for offset
-    filter_order = 2
-    freq = 1 #cutoff frequency
-    sampling = 50 # sampling frequency
-    sos = signal.butter(filter_order, freq, 'hp', fs=sampling, output='sos')
-    filtered = signal.sosfilt(sos, y1)
-    y1 = filtered
+    #filter_order = 2
+    #freq = 1 #cutoff frequency
+    #sampling = 50 # sampling frequency
+    #sos = signal.butter(filter_order, freq, 'hp', fs=sampling, output='sos')
+    #filtered = signal.sosfilt(sos, y1)
+    #y1 = filtered
     
+    
+    # Hann Window to reduce artifacts
+    y2 = y1 * np.hanning(len(y1))
     
     
     # Cubic Spline part - the FFT requires a regular grid on the x-axis
     N = int(1e7) # these are the number of points that you will resample - try changing this and look how well the resampling follows the data.
     xs = np.linspace(x[0], x[-1], N) # x-axis to resample onto
-    y = y1[:len(x)] # make sure y axis has same length as x 
+    y = y2[:len(x)] # make sure y axis has same length as x 
     cs = spi.CubicSpline(x, y) # construct the cubic spline function
     
     
@@ -85,7 +86,7 @@ def plots(files, title, x):
         title += item[0]
         if file != files[:-1]:
             title += ' and '
-        plt.plot(item[1], np.array(item[2])/np.array(item[2]).max(), label=item[0]) #original plotting function
+        return [item[1], np.array(item[2])/np.array(item[2]).max(), item[0]] #original plotting function
         
 def plots_norm(files, title, x):
     for file in files:
@@ -122,8 +123,11 @@ def atten(files, title):
     print(atten_ratio)
     print(np.sum(item_2[2])/np.sum(item_1[2]))
 
-plots(files_i, title, 'i')
-plots(files_g, title, 'g')
+iplot = plots(files_i, title, 'i')
+gplot = plots(files_g, title, 'g')
+#plt.plot(iplot[0], iplot[1], label = iplot[2])
+#plt.plot(gplot[0], gplot[1], label = gplot[2])
+plt.plot(iplot[0], iplot[1] - gplot[1], label = 'difference')
 #plots_norm(files_i, title, 'i')
 #plots_norm(files_i, title, 'g')
 #atten(file_is, title)
