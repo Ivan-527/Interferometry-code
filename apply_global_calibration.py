@@ -10,7 +10,7 @@ from scipy import signal
 import scipy.fftpack as spf
 import scipy.signal as sps
 import scipy.interpolate as spi
-#import read_spectrum as rdsp
+import Read_spectrum as rdsp
 
 def data(file):
     #Step 1 get the data and the x position
@@ -65,28 +65,34 @@ def data(file):
     return [file, abs(repx1), abs(yf1[int(len(xf1)/2+1):len(xf1)])]
 
 
-#def grating(file):
-    #resultrdsp.read_data4('data/' + file + '.txt')
-
+def grating(file):
+    results = rdsp.read_data4('data/' + file + '.txt')
+    return [file, results[0], results[1]]
 
 
 files_i = str(input()).split(",") #data from interferogram
-#files_g = str(input()).split(",") #data from grating
+files_g = str(input()).split(",") #data from grating
 plt.figure('Spectrum using global calibration FFT')
 title = 'Data from: '
 
 
-def plots(files, title):
+def plots(files, title, x):
     for file in files:
-        item = data(file)
+        if x == 'i':
+            item = data(file)
+        if x == 'g':
+            item = grating(file)
         title += item[0]
         if file != files[:-1]:
             title += ' and '
-        plt.plot(item[1], item[2], label=item[0]) #original plotting function
+        plt.plot(item[1], np.array(item[2])/np.array(item[2]).max(), label=item[0]) #original plotting function
         
-def plots_norm(files, title):
+def plots_norm(files, title, x):
     for file in files:
-        item = data(file)
+        if x == 'i':
+            item = data(file)
+        if x == 'g':
+            item = grating(file)
         title += item[0]
         if file != files[:-1]:
             title += ' and '
@@ -116,9 +122,10 @@ def atten(files, title):
     print(atten_ratio)
     print(np.sum(item_2[2])/np.sum(item_1[2]))
 
-plots(files_i, title)
-#plots(files_g, title)
-#plots_norm(files_i, title)
+plots(files_i, title, 'i')
+plots(files_g, title, 'g')
+#plots_norm(files_i, title, 'i')
+#plots_norm(files_i, title, 'g')
 #atten(file_is, title)
 plt.title(title)
 plt.xlim(3.5e-7, 8e-7)
