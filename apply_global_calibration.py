@@ -15,7 +15,7 @@ def data(file):
     results = rd.read_data3('data/' + file + '.txt')
     
     # Describe the global calibration used (from either Task 6, or crossing_points.py)
-    metres_per_microstep = 3.65e-11 # metres
+    metres_per_microstep = 3.66e-11 # metres
     # if from Task 6, need to multiple by factor of 2 to account for the mirror movement to path difference conversion
     #metres_per_microstep = 2.0*metres_per_microstep
     
@@ -86,6 +86,7 @@ def plots(files, title, x):
         title += item[0]
         if file != files[:-1]:
             title += ' and '
+        print(item[1][np.argmax(item[2])])
         return [item[1], np.array(item[2])/np.array(item[2]).max(), item[0]] #original plotting function
         
 def plots_norm(files, title, x):
@@ -125,9 +126,10 @@ def atten(files, title):
 
 iplot = plots(files_i, title, 'i')
 gplot = plots(files_g, title, 'g')
-#plt.plot(iplot[0], iplot[1], label = iplot[2])
-#plt.plot(gplot[0], gplot[1], label = gplot[2])
-plt.plot(iplot[0], iplot[1] - gplot[1], label = 'difference')
+plt.plot(iplot[0], iplot[1], label = iplot[2])
+plt.plot(gplot[0], gplot[1], label = gplot[2])
+new_g = np.interp(iplot[0], gplot[0], gplot[1]) #interpolate the 'correct data' to get enough data points
+plt.plot(iplot[0], iplot[1] - new_g, label = 'difference')
 #plots_norm(files_i, title, 'i')
 #plots_norm(files_i, title, 'g')
 #atten(file_is, title)
@@ -138,7 +140,8 @@ plt.xlim(3.5e-7, 8e-7)
 plt.xlabel('Wavelength (m)')
 plt.ylabel('Intensity (a.u.)')
 plt.legend()
-plt.savefig('figures/temp_data.png')
 plt.grid()
+plt.savefig('figures/temp_data.png')
+
 plt.show()
 
