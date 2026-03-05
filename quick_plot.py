@@ -23,25 +23,16 @@ def extract(file):
     y2 = np.array(results[1])
     
     x=np.array(results[5])
+    
     plt.plot(x,np.log(y2),'o-', markersize=0.1)
     
+    return x, y2
 
 def sine(x, a, b, c):
     return a * np.sin(b * x + c) + 8.68e6
 
 
-
-#peaks, _ = find_peaks(y2) #guess fits
-#period_guess = np.mean(np.diff(x[peaks]))
-#b_guess = 1 / period_guess
-#a_guess = 4e4
-#b_guess = 4e-4
-#c_guess = 5.35#np.pi
-#d_guess = (np.max(y2) - np.min(y2))/2 + np.min(y2)
-
-#p_opt, p_cov = opt.curve_fit(sine, x, y2, [a_guess, b_guess, c_guess], maxfev=10000)
-#print(f'{p_opt[1]}', f'{np.sqrt(p_cov[1, 1])}')
-#y = sine(x, *p_opt)
+extract(files[0]+".txt")
 
 #print(f'rel error: {np.sqrt(p_cov[1, 1])/p_opt[1]}')
 
@@ -54,11 +45,10 @@ def sine(x, a, b, c):
 
 #plt.figure("Detector 2")
 #plt.plot(x, y)
-#plt.xlim(-0.1e7,0.1e7)
+#.xlim(0,1e5)
 
 plt.xlabel("Position microsteps")
 plt.ylabel("Signal 2")
-extract(files[0]+".txt")
 plt.savefig("figures/quick_plot_detector_2.png")
 
 
