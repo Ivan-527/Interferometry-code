@@ -70,36 +70,28 @@ def grating(file):
     results = rdsp.read_data4('data/' + file + '.txt')
     return [file, results[0], results[1]]
 
-
-files_i = str(input()).split(",") #data from interferogram
-files_g = str(input()).split(",") #data from grating
-plt.figure('Spectrum using global calibration FFT')
-title = 'Data from: '
-
-
-def plots(files, title, x):
+def plots(files, file_type, choice):
+    out = []
     for file in files:
-        if x == 'i':
+        if file_type == 'i':
             item = data(file)
-        if x == 'g':
+        elif file_type == 'g':
             item = grating(file)
-        title += item[0]
-        if file != files[:-1]:
-            title += ' and '
-        print(item[1][np.argmax(item[2])])
-        return [item[1], np.array(item[2])/np.array(item[2]).max(), item[0]] #original plotting function
+        else:
+            raise ValueError("c must be 'i' or 'g'")
+
+        x = item[1]
+        y = np.array(item[2])
         
-def plots_norm(files, title, x):
-    for file in files:
-        if x == 'i':
-            item = data(file)
-        if x == 'g':
-            item = grating(file)
-        title += item[0]
-        if file != files[:-1]:
-            title += ' and '
-        plt.plot(item[1], np.log(item[2]), label=item[0]) #original plotting function
-        print(item[1][np.argmax(item[2])])
+        if choice == 'd':
+            y = y/y.max()
+        
+        name = item[0]
+
+        plt.plot(x, y, label=name)
+        out.append(([x, y], name))
+
+    return out
 
 def atten(files, title):
     item_1 = data(files[0])
@@ -124,24 +116,40 @@ def atten(files, title):
     print(atten_ratio)
     print(np.sum(item_2[2])/np.sum(item_1[2]))
 
-iplot = plots(files_i, title, 'i')
-gplot = plots(files_g, title, 'g')
-plt.plot(iplot[0], iplot[1], label = iplot[2])
-plt.plot(gplot[0], gplot[1], label = gplot[2])
-new_g = np.interp(iplot[0], gplot[0], gplot[1]) #interpolate the 'correct data' to get enough data points
-plt.plot(iplot[0], iplot[1] - new_g, label = 'difference')
-#plots_norm(files_i, title, 'i')
-#plots_norm(files_i, title, 'g')
-#atten(file_is, title)
-plt.title(title)
+plt.figure('Spectrum using global calibration FFT')
+plt.title('Normalized Intensity against Wavelength')
+
+def diff():
+    while True:
+        files = str(input()).split(" ")
+        a, name1 = plots([files[0]], 'i', 'd')[0]
+        b, name2 = plots([files[1]], 'g', 'd')[0]
+        new_b = np.interp(a[0], b[0], b[1]) #interpolate the 'correct data' to get enough data points
+        plt.plot(a[0], a[1] - new_b, label = 'Difference between ' + name1 + ' and ' + name2)
+        cont = str(input())
+        if cont == '':
+            continue
+        else:
+            break
+
+def compare():
+    file_type = ''
+    while True:
+        file_type = input().strip()
+        if file_type == 'stop':
+            break
+    
+        files = input().split(" ")
+        plots(files, file_type, 'c')
+        
+#diff()
+compare()
+
+plt.figure('Spectrum using global calibration FFT')
+plt.title('Normalized Intensity against Wavelength')
 plt.xlim(3.5e-7, 8e-7)
-#plt.xlim(0, 4e-7)
-#plt.ylim(0, 0.8e9)
 plt.xlabel('Wavelength (m)')
-plt.ylabel('Intensity (a.u.)')
+plt.ylabel('Normalized Intensity')
 plt.legend()
 plt.grid()
-plt.savefig('figures/temp_data.png')
-
 plt.show()
-
