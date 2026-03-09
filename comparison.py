@@ -391,7 +391,15 @@ def remove_bumps_by_residual_smoothing(
         fill_value=np.nan
     )
     led_interp = interp_led(lam)
+    
+    valid2 = np.isfinite(cleaned) & np.isfinite(led_interp) & (led_interp > 0)
 
+    ratio = cleaned[valid2] / led_interp[valid2]
+    ratio_slow = savgol_filter(ratio, 31, 3)
+    
+    cleaned2 = cleaned.copy()
+    cleaned2[valid2] = cleaned[valid2] / ratio_slow
+        
     # Restrict to reliable plot range
     mask = (
         (lam >= plot_min) &
@@ -403,13 +411,25 @@ def remove_bumps_by_residual_smoothing(
 
     lam_plot = lam[mask]
     original_plot = white[mask]
-    cleaned_plot = cleaned[mask]
+    cleaned_plot = cleaned2[mask]
     led_plot = led_interp[mask]
     residual_plot = residual[mask]
     trend_plot = trend[mask]
     detrended_plot = residual_detrended[mask]
     bumps_plot = bumps[mask]
-
+    
+    # Diagnostic: compare spectra BEFORE normalization
+    plt.figure(f'Unnormalized comparison: {label}')
+    plt.plot(lam_plot, original_plot, label='Original white_light_4')
+    plt.plot(lam_plot, cleaned_plot, label='Bumps suppressed (unnormalized)')
+    plt.plot(lam_plot, led_plot, label='White_LED_Lens (interp)')
+    plt.xlabel('Wavelength (m)')
+    plt.ylabel('Raw intensity')
+    plt.title('Unnormalized spectrum comparison')
+    plt.xlim(plot_min, plot_max)
+    plt.grid()
+    plt.legend()
+    
     if len(lam_plot) < 10:
         raise ValueError("Not enough overlapping finite points in chosen plot range.")
 
