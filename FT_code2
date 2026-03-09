@@ -1,0 +1,205 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Mar  9 16:23:44 2026
+
+@author: imw24
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+import scipy.signal as sps
+import scipy.interpolate as spi
+import scipy.fftpack as spf
+
+import read_data_results3 as rd
+
+
+# -----------------------------
+# Helpers: FT pipeline
+# -----------------------------
+
+def center_zpd(x, y):
+    i0 = int(np.argmax(np.abs(y)))
+    shift = (len(y) // 2) - i0
+    y2 = np.roll(y, shift)
+    x2 = x - x[i0]
+    return x2, y2
+
+
+def ft_spectrum_from_interferogram(
+    x_opd_m, y, N=2**19, window="hann",
+    detrend_type="linear", interp_kind="linear",
+    use_real_spectrum=True, clip_negative=True,
+):
+    y = np.asarray(y, dtype=float)
+    x = np.asarray(x_opd_m, dtype=float)
+    y = sps.detrend(y, type=detrend_type)
+    x, y = center_zpd(x, y)
+
+    if window == "hann":
+        w = np.hanning(len(y))
+    elif window == "blackmanharris":
+        w = sps.windows.blackmanharris(len(y))
+    elif window == "kaiser14":
+        w = sps.windows.kaiser(len(y), beta=14.0)
+    else:
+        raise ValueError("window must be one of: 'hann', 'blackmanharris', 'kaiser14'")
+    y = y * w
+
+    xs = np.linspace(x.min(), x.max(), int(N))
+    f = spi.interp1d(x, y, kind=interp_kind, fill_value="extrapolate")
+    ys = f(xs)
+    dx = xs[1] - xs[0]
+
+    Y = np.fft.rfft(ys)
+    nu = np.fft.rfftfreq(len(xs), d=dx)
+    mask = nu > 0
+    nu = nu[mask]
+    Y = Y[mask]
+
+    if use_real_spectrum:
+        intensity = np.real(Y)
+        if clip_negative:
+            intensity = intensity.copy()
+            intensity[intensity < 0] = 0.0
+    else:
+        intensity = np.abs(Y)
+
+    OPDmax = float(np.max(np.abs(xs)))
+    expected_dnu = (1.0 / (2.0 * OPDmax)) if OPDmax > 0 else np.nan
+    meta = {
+        "dx_m": float(dx),
+        "OPDmax_m": OPDmax,
+        "expected_dnu_cycles_per_m": float(expected_dnu),
+        "N_uniform": int(len(xs)),
+    }
+    return nu, intensity, meta
+
+
+def data_i(file, metres_per_microstep=3.66e-11, N=2**19, window="hann", use_real_spectrum=True):
+    results = rd.read_data3("data/" + file + ".txt")
+    y1 = np.array(results[1], dtype=float)
+    x_microsteps = np.array(results[5], dtype=float)
+    x_opd_m = x_microsteps * metres_per_microstep
+    nu, intensity, meta = ft_spectrum_from_interferogram(
+        x_opd_m, y1, N=N, window=window,
+        detrend_type="linear", interp_kind="linear",
+        use_real_spectrum=use_real_spectrum, clip_negative=True,
+    )
+    return [file, nu, intensity, meta]
+
+
+def data_g(file):
+    """
+    Load grating spectrum. Handles comma and semicolon delimiters.
+    Converts wavelength from nm to metres.
+    """
+    path = "data/" + file + ".txt"
+    wavelengths, intensities = [], []
+    with open(path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            for delim in (',', ';'):
+                parts = line.split(delim)
+                if len(parts) == 2:
+                    try:
+                        wavelengths.append(float(parts[0]))
+                        intensities.append(float(parts[1]))
+                        break
+                    except ValueError:
+                        continue
+    wl = np.array(wavelengths) * 1e-9
+    return [file, wl, np.array(intensities)]
+
+
+def to_wavelength(x_nu):
+    x_nu = np.asarray(x_nu, dtype=float)
+    m = x_nu > 0
+    wl = np.empty_like(x_nu)
+    wl[:] = np.nan
+    wl[m] = 1.0 / x_nu[m]
+    return wl
+
+# -----------------------------
+# Main
+# -----------------------------
+
+if __name__ == "__main__":
+
+    files_i_input = input("Interferogram files - need FT (comma separated, blank to skip): ").strip()
+    files_g_input = input("Grating files - already spectra (comma separated, blank to skip): ").strip()
+
+    files_i = [f.strip() for f in files_i_input.split(",") if f.strip()] if files_i_input else []
+    files_g = [f.strip() for f in files_g_input.split(",") if f.strip()] if files_g_input else []
+
+    # ---------------------------------------------------------------
+    # SETTINGS
+    # ---------------------------------------------------------------
+    metres_per_microstep = 3.78e-11
+    N = 2**19
+    window = "hann"
+    use_real_spectrum = True
+    if files_i and files_g:
+            name_nom, nu_nom, intensity_nom, _ = data_i(
+                files_i[0], metres_per_microstep=metres_per_microstep,
+                N=N, window=window, use_real_spectrum=use_real_spectrum,
+            )
+            wl_nom = to_wavelength(nu_nom)
+            name_g0, wl_g0, int_g0 = data_g(files_g[0])
+    
+            mask_blue = np.isfinite(wl_nom) & (wl_nom > 420e-9) & (wl_nom < 480e-9)
+            blue_peak_wl = wl_nom[mask_blue][np.argmax(intensity_nom[mask_blue])]
+    
+            mask_orange = (wl_g0 > 420e-9) & (wl_g0 < 480e-9)
+            orange_peak_wl = wl_g0[mask_orange][np.argmax(int_g0[mask_orange])]
+    
+            scale_factor = orange_peak_wl / blue_peak_wl
+            metres_per_microstep_fitted = metres_per_microstep * scale_factor
+    
+            print("\nCalibration:")
+            print(f"  Blue peak (nominal):  {blue_peak_wl*1e9:.2f} nm")
+            print(f"  Orange peak:          {orange_peak_wl*1e9:.2f} nm")
+            print(f"  Scale factor:         {scale_factor:.6f}")
+            print(f"  Fitted m/microstep:   {metres_per_microstep_fitted:.4e}")
+    else:
+        metres_per_microstep_fitted = metres_per_microstep
+        print("\nCalibration skipped (need both interferogram and grating files)")
+
+    # ---------------------------------------------------------------
+    # LOAD ALL FILES WITH FITTED CALIBRATION
+    # ---------------------------------------------------------------
+    interferograms = []
+    for file in files_i:
+        name, nu, intensity, meta = data_i(
+            file, metres_per_microstep=metres_per_microstep_fitted,
+            N=N, window=window, use_real_spectrum=use_real_spectrum,
+        )
+        wl = to_wavelength(nu)
+        interferograms.append((name, wl, intensity))
+        print(f"\n--- {name} (interferogram) ---")
+        print("Diagnostics:", meta)
+
+    gratings = []
+    for file in files_g:
+        name, wl, intensity = data_g(file)
+        gratings.append((name, wl, intensity))
+    plt.figure("Spectra")
+    plt.title("Interferometer spectra (raw vs fringe-removed) and grating")
+    
+    for (name, wl, intensity) in interferograms:
+        m = np.isfinite(wl)
+        plt.plot(wl[m], intensity[m], alpha=0.3, label=f"{name} (raw)")
+    #for g_name, g_wl, g_intensity in gratings:
+        #plt.plot(g_wl, g_intensity, linestyle='--', label=g_name)
+
+    plt.xlim(3.5e-7, 8e-7)
+    #plt.ylim
+    plt.xlabel("Wavelength (m)")
+    plt.ylabel("Intensity (a.u.)")
+    plt.grid(True)
+    plt.legend()
+
+    plt.show()
