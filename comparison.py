@@ -5,6 +5,7 @@ import scipy.interpolate as spi
 import scipy.optimize as opt
 from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter, find_peaks
+from scipy.stats import chi2 as chi2_dist
 import read_data_results3 as rd
 import Read_spectrum as rdsp
 
@@ -22,7 +23,7 @@ def data(file):
     y1 = np.array(results[1], dtype=float)
     x = np.array(results[5], dtype=float) * metres_per_microstep
 
-    # CHANGED: sort before interpolation / spline
+    # Sort before interpolation / spline
     order = np.argsort(x)
     x = x[order]
     y1 = y1[order]
@@ -95,47 +96,64 @@ def make_valid_savgol_window(n_points, requested_window, polyorder):
     return w
 
 
-def estimate_led_yerr_from_smoothing(lam, y, window=11, polyorder=3, label='LED'):
+def gaussian(x, A, mu, sigma, c):
+    return A * np.exp(-0.5 * ((x - mu) / sigma) ** 2) + c
+
+
+def _fit_local_gaussian_peak(spatial_freq, fft_amp, peak_index, half_window=4):
     """
-    Estimate LED spectrum uncertainty from residuals about a smooth trend.
-    Returns a wavelength-dependent yerr using:
-      yerr = sqrt(local_residual^2 + RMS_residual^2)
+    Fit a local Gaussian around one detected FFT peak.
+    Returns None if the fit fails.
     """
-    lam = np.array(lam, dtype=float)
-    y = np.array(y, dtype=float)
+    i0 = max(0, peak_index - half_window)
+    i1 = min(len(spatial_freq), peak_index + half_window + 1)
 
-    valid = np.isfinite(lam) & np.isfinite(y)
-    lam = lam[valid]
-    y = y[valid]
+    x_fit = spatial_freq[i0:i1]
+    y_fit = fft_amp[i0:i1]
 
-    order = np.argsort(lam)
-    lam = lam[order]
-    y = y[order]
+    if len(x_fit) < 5:
+        return None
 
-    if len(y) < 10:
-        raise ValueError(f"[{label}] Not enough points for LED yerr estimation.")
+    A0 = max(np.max(y_fit) - np.min(y_fit), 1e-12)
+    mu0 = spatial_freq[peak_index]
+    sigma0 = max((x_fit[-1] - x_fit[0]) / 4.0, 1e-20)
+    c0 = np.min(y_fit)
 
-    window = make_valid_savgol_window(len(y), window, polyorder)
-    smooth = savgol_filter(y, window, polyorder)
-    residual = y - smooth
-    rms = np.sqrt(np.mean(residual**2))
+    try:
+        popt, pcov = opt.curve_fit(
+            gaussian,
+            x_fit,
+            y_fit,
+            p0=[A0, mu0, sigma0, c0],
+            bounds=([0.0, x_fit[0], 1e-20, -np.inf],
+                    [np.inf, x_fit[-1], np.inf, np.inf]),
+            maxfev=100000
+        )
 
-    yerr = np.sqrt(residual**2 + rms**2)
+        perr = np.sqrt(np.diag(pcov))
+        A_fit, mu_fit, sigma_fit, c_fit = popt
 
-    print(f"\n[{label}] --- LED yerr summary ---")
-    print(f"Savgol window used: {window}")
-    print(f"Residual RMS:       {rms:.4e}")
-    print(f"Mean LED yerr:      {np.mean(yerr):.4e}")
-    print(f"Max LED yerr:       {np.max(yerr):.4e}")
+        return {
+            'params': popt,
+            'param_errs': perr,
+            'A': A_fit,
+            'mu': mu_fit,
+            'sigma': sigma_fit,
+            'c': c_fit,
+            'A_err': perr[0],
+            'mu_err': perr[1],
+            'sigma_err': perr[2],
+            'c_err': perr[3],
+            'spacing': 1.0 / mu_fit,
+            'spacing_err': perr[1] / (mu_fit**2),
+            'x_fit': x_fit,
+            'y_fit': y_fit,
+            'y_model': gaussian(x_fit, *popt),
+            'raw_index': peak_index
+        }
 
-    return {
-        'lambda': lam,
-        'y': y,
-        'smooth': smooth,
-        'residual': residual,
-        'rms': rms,
-        'yerr': yerr
-    }
+    except Exception:
+        return None
 
 
 # =========================================================
@@ -177,10 +195,7 @@ def suppress_bumps_and_get_transmission(
     led_x = led_x[mask_led]
     led_y = led_y[mask_led]
 
-    # NOTE:
-    # These are separately max-normalised spectra.
-    # The resulting ratio is therefore a relative shape ratio, not an
-    # absolute transmission unless independent scaling justifies it.
+    # Separately max-normalised spectra
     white_y = white_y / np.nanmax(white_y)
     led_y = led_y / np.nanmax(led_y)
 
@@ -395,9 +410,9 @@ def estimate_yerr_from_processing(
 
 # =========================================================
 # 5. Inverse transmission linear fit
-#    CHANGED:
 #    - weighted fit using sigma=yerr_inverse
 #    - xerr_frac = 5.9%
+#    - p-value reported from chi-squared distribution
 # =========================================================
 
 def analyze_inverse_transmission(
@@ -442,7 +457,6 @@ def analyze_inverse_transmission(
 
     p0 = [0.0, np.mean(y_fit)]
 
-    # CHANGED: weighted fit
     popt, pcov = opt.curve_fit(
         line_model,
         lam_fit,
@@ -468,6 +482,7 @@ def analyze_inverse_transmission(
     chi2 = np.sum((residuals_used**2) / sigma_tot_sq)
     dof = len(y_fit) - 2
     chi2_red = chi2 / dof if dof > 0 else np.nan
+    p_value = chi2_dist.sf(chi2, dof) if dof > 0 else np.nan
 
     weights = 1.0 / sigma_tot_sq
     y_mean_w = np.sum(weights * y_fit) / np.sum(weights)
@@ -482,6 +497,7 @@ def analyze_inverse_transmission(
     print(f"c = {c:.6e} ± {c_err:.6e}")
     print(f"Chi-squared = {chi2:.6e}")
     print(f"Reduced chi-squared = {chi2_red:.6e}")
+    print(f"p-value (from chi-squared, same dof) = {p_value:.6e}")
     print(f"Weighted R^2 = {r2_weighted:.6f}")
 
     cutoff_values = np.arange(cutoff_min, cutoff_max + 0.5 * cutoff_step, cutoff_step)
@@ -490,6 +506,7 @@ def analyze_inverse_transmission(
     m_list = []
     c_list = []
     chi2_red_list = []
+    p_value_list = []
     r2_list = []
 
     for cutoff in cutoff_values:
@@ -524,6 +541,7 @@ def analyze_inverse_transmission(
             chi2_sub = np.sum((resid_sub**2) / sigma_tot_sq_sub)
             dof_sub = len(y_sub) - 2
             chi2_red_sub = chi2_sub / dof_sub if dof_sub > 0 else np.nan
+            p_sub_value = chi2_dist.sf(chi2_sub, dof_sub) if dof_sub > 0 else np.nan
 
             w_sub = 1.0 / sigma_tot_sq_sub
             y_mean_w_sub = np.sum(w_sub * y_sub) / np.sum(w_sub)
@@ -535,6 +553,7 @@ def analyze_inverse_transmission(
             m_list.append(m_sub)
             c_list.append(c_sub)
             chi2_red_list.append(chi2_red_sub)
+            p_value_list.append(p_sub_value)
             r2_list.append(r2_sub)
 
         except Exception:
@@ -544,6 +563,7 @@ def analyze_inverse_transmission(
     m_list = np.array(m_list)
     c_list = np.array(c_list)
     chi2_red_list = np.array(chi2_red_list)
+    p_value_list = np.array(p_value_list)
     r2_list = np.array(r2_list)
 
     if make_plots:
@@ -606,18 +626,20 @@ def analyze_inverse_transmission(
         'c_err': c_err,
         'chi2': chi2,
         'chi2_red': chi2_red,
+        'p_value': p_value,
         'r2_weighted': r2_weighted,
         'cutoff_values': cutoff_list,
         'slope_values': m_list,
         'intercept_values': c_list,
         'chi2_red_values': chi2_red_list,
+        'p_value_values': p_value_list,
         'r2_values': r2_list,
         'fit_max': fit_max
     }
 
 
 # =========================================================
-# 6. Bump FFT for peak amplitudes, fringe spacing and uncertainties
+# 6. Bump FFT with Gaussian peak fitting
 # =========================================================
 
 def analyse_bump_structure_fft(
@@ -677,69 +699,118 @@ def analyse_bump_structure_fft(
         peak_indices = np.argsort(fft_amp)[-min(max_peaks, len(fft_amp)):]
 
     peak_amps = fft_amp[peak_indices]
-    peak_freqs = spatial_freq[peak_indices]
-
     order_pk = np.argsort(peak_amps)
-    peak_amps = peak_amps[order_pk]
-    peak_freqs = peak_freqs[order_pk]
+    peak_indices = peak_indices[order_pk]
 
-    dominant_amp = peak_amps[-1]
-    secondary_amp = peak_amps[-2] if len(peak_amps) >= 2 else None
+    # Raw information kept internally only
+    peak_freqs_raw = spatial_freq[peak_indices]
+    peak_amps_raw = fft_amp[peak_indices]
+
+    dominant_amp = peak_amps_raw[-1]
+    secondary_amp = peak_amps_raw[-2] if len(peak_amps_raw) >= 2 else None
+
+    # Gaussian refinement for each detected peak
+    gaussian_fits = []
+    for idx in peak_indices:
+        fit_result = _fit_local_gaussian_peak(spatial_freq, fft_amp, idx, half_window=4)
+        if fit_result is not None:
+            gaussian_fits.append(fit_result)
+
+    if len(gaussian_fits) == 0:
+        print(f"[{label}] WARNING: Gaussian fitting failed for all FFT peaks.")
+        return None
+
+    gaussian_fits = sorted(gaussian_fits, key=lambda d: d['A'])
+
+    gaussian_peak_freqs = np.array([d['mu'] for d in gaussian_fits])
+    gaussian_peak_freq_errs = np.array([d['mu_err'] for d in gaussian_fits])
+    gaussian_peak_amps = np.array([d['A'] for d in gaussian_fits])
+    gaussian_peak_spacings = np.array([d['spacing'] for d in gaussian_fits])
+    gaussian_peak_spacing_errs = np.array([d['spacing_err'] for d in gaussian_fits])
+    gaussian_sigmas = np.array([d['sigma'] for d in gaussian_fits])
+    gaussian_sigma_errs = np.array([d['sigma_err'] for d in gaussian_fits])
+    gaussian_offsets = np.array([d['c'] for d in gaussian_fits])
+
+    print(f"\n[{label}] --- Gaussian FFT peak summary ---")
+    for i, fit in enumerate(gaussian_fits, start=1):
+        print(
+            f"Gaussian peak {i}: "
+            f"A = {fit['A']:.6e} ± {fit['A_err']:.6e}, "
+            f"mu = {fit['mu']:.6e} ± {fit['mu_err']:.6e} cycles/m, "
+            f"sigma = {fit['sigma']:.6e} ± {fit['sigma_err']:.6e} cycles/m, "
+            f"offset = {fit['c']:.6e} ± {fit['c_err']:.6e}, "
+            f"Δλ = {fit['spacing']*1e9:.3f} ± {fit['spacing_err']*1e9:.3f} nm"
+        )
+
+    # Plotting range: only show region where peaks actually exist
+    max_peak_freq = np.max(gaussian_peak_freqs)
+    spatial_freq_xlim_max = 1.5 * max_peak_freq
+    spatial_freq_xlim_max = min(spatial_freq_xlim_max, np.max(spatial_freq))
 
     fringe_spacing = 1.0 / spatial_freq
-    peak_fringe_spacing = 1.0 / peak_freqs
-
-    # Uncertainty estimate from FFT bin width:
-    # df ≈ 1 / total_lambda_span
-    total_span = lam_uniform[-1] - lam_uniform[0]
-    df = 1.0 / total_span
-    peak_freq_err = np.full_like(peak_freqs, 0.5 * df)
-
-    # propagate s = 1/f -> sigma_s = sigma_f / f^2
-    peak_fringe_spacing_err = peak_freq_err / (peak_freqs**2)
-
-    print(f"\n[{label}] --- Bump FFT summary ---")
-    print(f"FFT bin spacing df:       {df:.6e} cycles/m")
-    print(f"Dominant peak amplitude:  {dominant_amp:.6e}")
-    if secondary_amp is not None:
-        print(f"Secondary peak amplitude: {secondary_amp:.6e}")
-        print(f"Secondary/dominant ratio: {secondary_amp/dominant_amp:.4f}")
-
-    print("\nDetected fringe-spacing peaks:")
-    for i, (fpk, sfpk, dsfpk, apk) in enumerate(
-        zip(peak_freqs, peak_fringe_spacing, peak_fringe_spacing_err, peak_amps), start=1
-    ):
-        print(
-            f"Peak {i}: "
-            f"freq = {fpk:.6e} cycles/m, "
-            f"Δλ = {sfpk*1e9:.3f} ± {dsfpk*1e9:.3f} nm, "
-            f"amp = {apk:.6e}"
-        )
 
     if make_plots:
         fig, axes = plt.subplots(1, 2, figsize=(13, 4.8), num=f'Bump FFT: {label}')
 
-        axes[0].plot(spatial_freq * 1e-6, fft_amp, label='FFT amplitude')
-        axes[0].plot(peak_freqs * 1e-6, peak_amps, 'o', color='red', label='Detected peaks')
+        # Spatial frequency domain: truncated to relevant region only
+        plot_mask_sf = spatial_freq <= spatial_freq_xlim_max
+        axes[0].plot(
+            spatial_freq[plot_mask_sf] * 1e-6,
+            fft_amp[plot_mask_sf],
+            label='FFT amplitude'
+        )
+
+        for i, fit in enumerate(gaussian_fits, start=1):
+            x_dense = np.linspace(fit['x_fit'][0], fit['x_fit'][-1], 400)
+            y_dense = gaussian(x_dense, *fit['params'])
+            axes[0].plot(
+                x_dense * 1e-6,
+                y_dense,
+                linewidth=2,
+                label=f'Gaussian fit {i}'
+            )
+            axes[0].errorbar(
+                fit['mu'] * 1e-6,
+                fit['A'] + fit['c'],
+                xerr=fit['mu_err'] * 1e-6,
+                fmt='o',
+                capsize=3
+            )
+
+        axes[0].set_xlim(0, spatial_freq_xlim_max * 1e-6)
         axes[0].set_xlabel('Spatial frequency (cycles / µm of wavelength)')
         axes[0].set_ylabel('FFT amplitude')
-        axes[0].set_title('FFT in spatial-frequency domain')
+        axes[0].set_title('FFT with Gaussian peak fits')
         axes[0].grid()
         axes[0].legend()
 
+        # Fringe-spacing domain: only around relevant spacing range
+        spacing_min_nm = max(0.0, np.min(gaussian_peak_spacings) * 1e9 * 0.7)
+        spacing_max_nm = np.max(gaussian_peak_spacings) * 1e9 * 1.5
+
+        plot_mask_spacing = (
+            (fringe_spacing * 1e9 >= spacing_min_nm) &
+            (fringe_spacing * 1e9 <= spacing_max_nm)
+        )
+
+        axes[1].plot(
+            fringe_spacing[plot_mask_spacing] * 1e9,
+            fft_amp[plot_mask_spacing],
+            alpha=0.4,
+            label='FFT amplitude'
+        )
         axes[1].errorbar(
-            peak_fringe_spacing * 1e9,
-            peak_amps,
-            xerr=peak_fringe_spacing_err * 1e9,
+            gaussian_peak_spacings * 1e9,
+            gaussian_peak_amps + gaussian_offsets,
+            xerr=gaussian_peak_spacing_errs * 1e9,
             fmt='o',
             capsize=3,
-            label='FFT peaks'
+            label='Gaussian centres'
         )
-        axes[1].plot(fringe_spacing * 1e9, fft_amp, alpha=0.35, label='FFT amplitude')
-        axes[1].set_xlim(0, 50)
+        axes[1].set_xlim(spacing_min_nm, spacing_max_nm)
         axes[1].set_xlabel('Fringe spacing Δλ (nm)')
         axes[1].set_ylabel('FFT amplitude')
-        axes[1].set_title('FFT peaks in fringe-spacing domain')
+        axes[1].set_title('Gaussian-refined fringe spacings')
         axes[1].grid()
         axes[1].legend()
 
@@ -748,14 +819,18 @@ def analyse_bump_structure_fft(
     return {
         'spatial_freq': spatial_freq,
         'fft_amp': fft_amp,
-        'peak_freqs': peak_freqs,
-        'peak_freq_errs': peak_freq_err,
-        'peak_amps': peak_amps,
-        'peak_fringe_spacing': peak_fringe_spacing,
-        'peak_fringe_spacing_err': peak_fringe_spacing_err,
+        'peak_freqs': peak_freqs_raw,
+        'peak_amps': peak_amps_raw,
+        'gaussian_fits': gaussian_fits,
+        'gaussian_peak_freqs': gaussian_peak_freqs,
+        'gaussian_peak_freq_errs': gaussian_peak_freq_errs,
+        'gaussian_peak_amps': gaussian_peak_amps,
+        'gaussian_peak_spacings': gaussian_peak_spacings,
+        'gaussian_peak_spacing_errs': gaussian_peak_spacing_errs,
+        'gaussian_sigmas': gaussian_sigmas,
+        'gaussian_sigma_errs': gaussian_sigma_errs,
         'dominant_amp': dominant_amp,
-        'secondary_amp': secondary_amp,
-        'fft_bin_spacing': df
+        'secondary_amp': secondary_amp
     }
 
 
@@ -777,8 +852,8 @@ result = suppress_bumps_and_get_transmission(
     white_y,
     led_x,
     led_y,
-    trend_window=15,   # will become 15 internally because Savitzky-Golay needs odd window
-    bump_window=7,
+    trend_window=16,
+    bump_window=7                                                                                   ,
     polyorder=3,
     lam_min=4.4e-7,
     lam_max=7e-7,
@@ -797,12 +872,27 @@ bump_fft_result = analyse_bump_structure_fft(
     make_plots=True
 )
 
-if bump_fft_result is not None and bump_fft_result['secondary_amp'] is not None:
+# Use Gaussian-refined amplitudes when available
+if (
+    bump_fft_result is not None and
+    len(bump_fft_result['gaussian_peak_amps']) >= 2
+):
+    dominant_amp = bump_fft_result['gaussian_peak_amps'][-1]
+    secondary_amp = bump_fft_result['gaussian_peak_amps'][-2]
+elif bump_fft_result is not None and bump_fft_result['secondary_amp'] is not None:
     dominant_amp = bump_fft_result['dominant_amp']
     secondary_amp = bump_fft_result['secondary_amp']
 else:
     dominant_amp = None
     secondary_amp = None
+
+if bump_fft_result is not None and len(bump_fft_result['gaussian_peak_spacings']) > 0:
+    best_spacing = bump_fft_result['gaussian_peak_spacings'][-1]
+    best_spacing_err = bump_fft_result['gaussian_peak_spacing_errs'][-1]
+    print(
+        f"\nBest Gaussian-refined fringe spacing: "
+        f"{best_spacing*1e9:.3f} ± {best_spacing_err*1e9:.3f} nm"
+    )
 
 yerr_result = estimate_yerr_from_processing(
     result,
@@ -812,42 +902,21 @@ yerr_result = estimate_yerr_from_processing(
     make_plots=True
 )
 
-# CHANGED: estimate denominator (LED) uncertainty too
-led_yerr_result = estimate_led_yerr_from_smoothing(
-    led_x,
-    led_y,
-    window=11,
-    polyorder=3,
-    label='White_LED_Lens'
-)
-
-# Propagate uncertainties for inverse transmission:
+# White LED Lens is assumed accurate, so no extra Savitzky-Golay uncertainty model is used.
+# Propagate only the bump-suppressed white-spectrum uncertainty:
 # inverse_transmission = white_suppressed / led
-#
-# sigma_inv^2 ≈ (sigma_white / led)^2 + (white_suppressed * sigma_led / led^2)^2
+# so sigma_inv ≈ sigma_white_suppressed / led
 
-lam_white = np.array(yerr_result['lambda'], dtype=float)
+lam_yerr = np.array(yerr_result['lambda'], dtype=float)
 yerr_white = np.array(yerr_result['yerr'], dtype=float)
 
-lam_led = np.array(led_yerr_result['lambda'], dtype=float)
-yerr_led = np.array(led_yerr_result['yerr'], dtype=float)
-
 lam_t = np.array(result['lambda_transmission'], dtype=float)
-white_t = np.array(result['white_suppressed_transmission'], dtype=float)
 led_t = np.array(result['led_norm_transmission'], dtype=float)
 
-interp_yerr_white = interp1d(lam_white, yerr_white, bounds_error=False, fill_value=np.nan)
-interp_yerr_led = interp1d(lam_led, yerr_led, bounds_error=False, fill_value=np.nan)
+interp_yerr = interp1d(lam_yerr, yerr_white, bounds_error=False, fill_value=np.nan)
+yerr_white_on_t = interp_yerr(lam_t)
 
-yerr_white_on_t = interp_yerr_white(lam_t)
-yerr_led_on_t = interp_yerr_led(lam_t)
-
-den = np.maximum(np.abs(led_t), 1e-12)
-
-yerr_inverse = np.sqrt(
-    (yerr_white_on_t / den)**2 +
-    ((np.abs(white_t) * yerr_led_on_t) / (den**2))**2
-)
+yerr_inverse = yerr_white_on_t / np.maximum(np.abs(led_t), 1e-12)
 
 inverse_result = analyze_inverse_transmission(
     result['lambda_transmission'],
@@ -857,7 +926,7 @@ inverse_result = analyze_inverse_transmission(
     cutoff_min=6.45e-7,
     cutoff_max=6.60e-7,
     cutoff_step=0.01e-7,
-    xerr_frac=0.0059,   # CHANGED: 5.9%
+    xerr_frac=0.0059,   # 0.59%
     make_plots=True
 )
 
